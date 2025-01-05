@@ -355,6 +355,7 @@ export interface Memory {
 
     /** Embedding similarity score */
     similarity?: number;
+    metadata?: { fileName: string };
 }
 
 /**
@@ -987,6 +988,12 @@ export interface IMemoryManager {
     removeAllMemories(roomId: UUID): Promise<void>;
 
     countMemories(roomId: UUID, unique?: boolean): Promise<number>;
+
+    /**
+     * Adds documents to the memory manager.
+     * @param documents - An array of documents to add.
+     */
+    addDocuments(documents: { fileName: string; content: string }[]): Promise<void>;
 }
 
 export type CacheOptions = {
@@ -1030,6 +1037,7 @@ export abstract class Service {
 export interface IAgentRuntime {
     // Properties
     agentId: UUID;
+    userId: UUID;
     serverUrl: string;
     databaseAdapter: IDatabaseAdapter;
     token: string | null;

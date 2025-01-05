@@ -36,11 +36,6 @@ export class MemoryManager implements IMemoryManager {
     }
 
     /**
-     * Adds an embedding vector to a memory object. If the memory already has an embedding, it is returned as is.
-     * @param memory The memory object to add an embedding to.
-     * @returns A Promise resolving to the memory object, potentially updated with an embedding vector.
-     */
-    /**
      * Adds an embedding vector to a memory object if one doesn't already exist.
      * The embedding is generated from the memory's text content using the runtime's
      * embedding model. If the memory has no text content, an error is thrown.
@@ -50,14 +45,12 @@ export class MemoryManager implements IMemoryManager {
      * @throws Error if the memory content is empty
      */
     async addEmbeddingToMemory(memory: Memory): Promise<Memory> {
-        // Return early if embedding already exists
         if (memory.embedding) {
             return memory;
         }
 
         const memoryText = memory.content.text;
 
-        // Validate memory has text content
         if (!memoryText) {
             throw new Error(
                 "Cannot generate embedding: Memory content is empty"
@@ -65,11 +58,9 @@ export class MemoryManager implements IMemoryManager {
         }
 
         try {
-            // Generate embedding from text content
             memory.embedding = await embed(this.runtime, memoryText);
         } catch (error) {
             elizaLogger.error("Failed to generate embedding:", error);
-            // Fallback to zero vector if embedding fails
             memory.embedding = getEmbeddingZeroVector().slice();
         }
 
@@ -77,12 +68,30 @@ export class MemoryManager implements IMemoryManager {
     }
 
     /**
+     * Adds documents to the memory manager.
+     * @param documents - An array of documents to add.
+     * @returns A Promise that resolves when all documents are added.
+     */
+    async addDocuments(documents: { fileName: string; content: string }[]): Promise<void> {
+        for (const document of documents) {
+            try {
+                await this.createMemory({
+                    id: crypto.randomUUID(), // Generate a unique ID for the memory
+                    userId: this.runtime.userId, // Add a valid userId
+                    content: { text: document.content },
+                    metadata: { fileName: document.fileName },
+                    createdAt: Date.now(),
+                    agentId: this.runtime.agentId, // Ensure runtime.agentId is valid
+                    roomId: crypto.randomUUID(), // Generate a valid UUID for the room ID
+                });
+            } catch (error) {
+                elizaLogger.error(`Failed to add document ${document.fileName}:`, error);
+            }
+        }
+    }
+
+    /**
      * Retrieves a list of memories by user IDs, with optional deduplication.
-     * @param opts Options including user IDs, count, and uniqueness.
-     * @param opts.roomId The room ID to retrieve memories for.
-     * @param opts.count The number of memories to retrieve.
-     * @param opts.unique Whether to retrieve unique memories only.
-     * @returns A Promise resolving to an array of Memory objects.
      */
     async getMemories({
         roomId,
@@ -126,13 +135,6 @@ export class MemoryManager implements IMemoryManager {
 
     /**
      * Searches for memories similar to a given embedding vector.
-     * @param embedding The embedding vector to search with.
-     * @param opts Options including match threshold, count, user IDs, and uniqueness.
-     * @param opts.match_threshold The similarity threshold for matching memories.
-     * @param opts.count The maximum number of memories to retrieve.
-     * @param opts.roomId The room ID to retrieve memories for.
-     * @param opts.unique Whether to retrieve unique memories only.
-     * @returns A Promise resolving to an array of Memory objects that match the embedding.
      */
     async searchMemoriesByEmbedding(
         embedding: number[],
@@ -165,79 +167,84 @@ export class MemoryManager implements IMemoryManager {
 
     /**
      * Creates a new memory in the database, with an option to check for similarity before insertion.
-     * @param memory The memory object to create.
-     * @param unique Whether to check for similarity before insertion.
-     * @returns A Promise that resolves when the operation completes.
      */
     async createMemory(memory: Memory, unique = false): Promise<void> {
-        // TODO: check memory.agentId == this.runtime.agentId
-
         const existingMessage =
             await this.runtime.databaseAdapter.getMemoryById(memory.id);
 
-        if (existingMessage) {
-            elizaLogger.debug("Memory already exists, skipping");
-            return;
+            if (existingMessage) {
+                elizaLogger.debug("Memory already exists, skipping");
+                return;
+            }
+    
+            elizaLogger.log("Creating Memory", memory.id, memory.content.text);
+    
+            await this.runtime.databaseAdapter.createMemory(
+                memory,
+                this.tableName,
+                unique
+            );
         }
-
-        elizaLogger.log("Creating Memory", memory.id, memory.content.text);
-
-        await this.runtime.databaseAdapter.createMemory(
-            memory,
-            this.tableName,
-            unique
-        );
+    
+        /**
+         * Retrieves memories by room IDs.
+         * @param params Object containing room IDs.
+         * @returns A Promise resolving to an array of Memory objects.
+         */
+        async getMemoriesByRoomIds(params: { roomIds: UUID[] }): Promise<Memory[]> {
+            return await this.runtime.databaseAdapter.getMemoriesByRoomIds({
+                tableName: this.tableName,
+                agentId: this.runtime.agentId,
+                roomIds: params.roomIds,
+            });
+        }
+    
+        /**
+         * Retrieves a memory by its ID.
+         * @param id The ID of the memory to retrieve.
+         * @returns A Promise resolving to the Memory object or null if not found.
+         */
+        async getMemoryById(id: UUID): Promise<Memory | null> {
+            const result = await this.runtime.databaseAdapter.getMemoryById(id);
+            if (result && result.agentId !== this.runtime.agentId) return null;
+            return result;
+        }
+    
+        /**
+         * Removes a memory from the database by its ID.
+         * @param memoryId The ID of the memory to remove.
+         * @returns A Promise that resolves when the operation completes.
+         */
+        async removeMemory(memoryId: UUID): Promise<void> {
+            await this.runtime.databaseAdapter.removeMemory(
+                memoryId,
+                this.tableName
+            );
+        }
+    
+        /**
+         * Removes all memories associated with a specific room ID.
+         * @param roomId The room ID to remove memories for.
+         * @returns A Promise that resolves when the operation completes.
+         */
+        async removeAllMemories(roomId: UUID): Promise<void> {
+            await this.runtime.databaseAdapter.removeAllMemories(
+                roomId,
+                this.tableName
+            );
+        }
+    
+        /**
+         * Counts the number of memories associated with a specific room ID, with an option for uniqueness.
+         * @param roomId The room ID to count memories for.
+         * @param unique Whether to count unique memories only.
+         * @returns A Promise resolving to the count of memories.
+         */
+        async countMemories(roomId: UUID, unique = true): Promise<number> {
+            return await this.runtime.databaseAdapter.countMemories(
+                roomId,
+                unique,
+                this.tableName
+            );
+        }
     }
-
-    async getMemoriesByRoomIds(params: { roomIds: UUID[] }): Promise<Memory[]> {
-        return await this.runtime.databaseAdapter.getMemoriesByRoomIds({
-            tableName: this.tableName,
-            agentId: this.runtime.agentId,
-            roomIds: params.roomIds,
-        });
-    }
-
-    async getMemoryById(id: UUID): Promise<Memory | null> {
-        const result = await this.runtime.databaseAdapter.getMemoryById(id);
-        if (result && result.agentId !== this.runtime.agentId) return null;
-        return result;
-    }
-
-    /**
-     * Removes a memory from the database by its ID.
-     * @param memoryId The ID of the memory to remove.
-     * @returns A Promise that resolves when the operation completes.
-     */
-    async removeMemory(memoryId: UUID): Promise<void> {
-        await this.runtime.databaseAdapter.removeMemory(
-            memoryId,
-            this.tableName
-        );
-    }
-
-    /**
-     * Removes all memories associated with a set of user IDs.
-     * @param roomId The room ID to remove memories for.
-     * @returns A Promise that resolves when the operation completes.
-     */
-    async removeAllMemories(roomId: UUID): Promise<void> {
-        await this.runtime.databaseAdapter.removeAllMemories(
-            roomId,
-            this.tableName
-        );
-    }
-
-    /**
-     * Counts the number of memories associated with a set of user IDs, with an option for uniqueness.
-     * @param roomId The room ID to count memories for.
-     * @param unique Whether to count unique memories only.
-     * @returns A Promise resolving to the count of memories.
-     */
-    async countMemories(roomId: UUID, unique = true): Promise<number> {
-        return await this.runtime.databaseAdapter.countMemories(
-            roomId,
-            unique,
-            this.tableName
-        );
-    }
-}

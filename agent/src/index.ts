@@ -7,6 +7,7 @@ import { LensAgentClient } from "@elizaos/client-lens";
 import { SlackClientInterface } from "@elizaos/client-slack";
 import { TelegramClientInterface } from "@elizaos/client-telegram";
 import { TwitterClientInterface } from "@elizaos/client-twitter";
+import { loadDocuments } from './loadDocuments';
 import {
     AgentRuntime,
     CacheManager,
@@ -210,7 +211,7 @@ export async function loadCharacters(
 }
 
 export function getTokenForProvider(
-    provider: ModelProviderName,
+    provider: keyof typeof ModelProviderName,
     character: Character
 ): string {
     switch (provider) {
@@ -468,7 +469,7 @@ export async function createAgent(
     db: IDatabaseAdapter,
     cache: ICacheManager,
     token: string
-): Promise<AgentRuntime> {
+): Promise<IAgentRuntime> {
     elizaLogger.success(
         elizaLogger.successesTitle,
         "Creating runtime for character",
@@ -495,12 +496,20 @@ export async function createAgent(
         );
     }
 
-    return new AgentRuntime({
+    // Generate or get agentId
+    const agentId = character.id ?? stringToUuid(character.name);
+    
+    // Load documents
+    const documents = await loadDocuments();
+
+    const runtime = new AgentRuntime({
         databaseAdapter: db,
         token,
         modelProvider: character.modelProvider,
         evaluators: [],
         character,
+        agentId: agentId,    // Explicitly set agentId
+        userId: agentId,     // Set userId to same as agentId by default
         // character.plugins are handled when clients are added
         plugins: [
             bootstrapPlugin,
@@ -579,6 +588,11 @@ export async function createAgent(
         cacheManager: cache,
         fetch: logFetch,
     });
+
+    // Add documents to the runtime's loreManager
+    await runtime.loreManager.addDocuments(documents);
+
+    return runtime;
 }
 
 function initializeFsCache(baseDir: string, character: Character) {
@@ -635,7 +649,7 @@ function initializeCache(
 async function startAgent(
     character: Character,
     directClient: DirectClient
-): Promise<AgentRuntime> {
+): Promise<IAgentRuntime> {
     let db: IDatabaseAdapter & IDatabaseCacheAdapter;
     try {
         character.id ??= stringToUuid(character.name);
@@ -659,13 +673,30 @@ async function startAgent(
             "",
             db
         ); // "" should be replaced with dir for file system caching. THOUGHTS: might probably make this into an env
-        const runtime: AgentRuntime = await createAgent(
+        const runtime: IAgentRuntime = await createAgent(
             character,
             db,
             cache,
             token
         );
 
+       // Add shared lore to the runtime
+        const sharedLore = [
+            "The world of Eliza is a simulation where agents interact with humans and each other.",
+            "All agents are part of the ElizaOS ecosystem, designed to assist and collaborate.",
+            "The shared goal of all agents is to provide helpful, empathetic, and intelligent responses."
+        ];
+
+        for (const lore of sharedLore) {
+            await runtime.loreManager.createMemory({
+                id: stringToUuid(lore), // Generate a unique ID for the lore
+                content: { text: lore },
+                roomId: runtime.agentId, // Use the agent's ID as the room ID
+                userId: runtime.agentId, // Use the agent's ID as the user ID
+                agentId: runtime.agentId, // Associate the lore with the agent
+            });
+        }
+       
         // start services/plugins/process knowledge
         await runtime.initialize();
 

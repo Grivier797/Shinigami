@@ -49,7 +49,7 @@ import { stringToUuid } from "./uuid.ts";
 
 /**
  * Represents the runtime environment for an agent, handling message processing,
- * action registration, and interaction with external services like OpenAI and Supabase.
+ * action registration, and interaction with external services.
  */
 export class AgentRuntime implements IAgentRuntime {
     /**
@@ -57,10 +57,17 @@ export class AgentRuntime implements IAgentRuntime {
      * @private
      */
     readonly #conversationLength = 32 as number;
+    
     /**
      * The ID of the agent
      */
     agentId: UUID;
+
+    /**
+     * The ID of the user associated with this runtime
+     */
+    userId: UUID;
+
     /**
      * The base URL of the server where the agent's requests are processed.
      */
@@ -105,7 +112,6 @@ export class AgentRuntime implements IAgentRuntime {
 
     /**
      * Fetch function to use
-     * Some environments may not have access to the global fetch function and need a custom fetch override.
      */
     fetch = fetch;
 
@@ -125,7 +131,7 @@ export class AgentRuntime implements IAgentRuntime {
     descriptionManager: IMemoryManager;
 
     /**
-     * Manage the creation and recall of static information (documents, historical game lore, etc)
+     * Manage the creation and recall of static information
      */
     loreManager: IMemoryManager;
 
@@ -144,83 +150,21 @@ export class AgentRuntime implements IAgentRuntime {
     cacheManager: ICacheManager;
     clients: Record<string, any>;
 
-    registerMemoryManager(manager: IMemoryManager): void {
-        if (!manager.tableName) {
-            throw new Error("Memory manager must have a tableName");
-        }
-
-        if (this.memoryManagers.has(manager.tableName)) {
-            elizaLogger.warn(
-                `Memory manager ${manager.tableName} is already registered. Skipping registration.`
-            );
-            return;
-        }
-
-        this.memoryManagers.set(manager.tableName, manager);
-    }
-
-    getMemoryManager(tableName: string): IMemoryManager | null {
-        return this.memoryManagers.get(tableName) || null;
-    }
-
-    getService<T extends Service>(service: ServiceType): T | null {
-        const serviceInstance = this.services.get(service);
-        if (!serviceInstance) {
-            elizaLogger.error(`Service ${service} not found`);
-            return null;
-        }
-        return serviceInstance as T;
-    }
-
-    async registerService(service: Service): Promise<void> {
-        const serviceType = service.serviceType;
-        elizaLogger.log("Registering service:", serviceType);
-
-        if (this.services.has(serviceType)) {
-            elizaLogger.warn(
-                `Service ${serviceType} is already registered. Skipping registration.`
-            );
-            return;
-        }
-
-        // Add the service to the services map
-        this.services.set(serviceType, service);
-        elizaLogger.success(`Service ${serviceType} registered successfully`);
-    }
-
-    /**
-     * Creates an instance of AgentRuntime.
-     * @param opts - The options for configuring the AgentRuntime.
-     * @param opts.conversationLength - The number of messages to hold in the recent message cache.
-     * @param opts.token - The JWT token, can be a JWT token if outside worker, or an OpenAI token if inside worker.
-     * @param opts.serverUrl - The URL of the worker.
-     * @param opts.actions - Optional custom actions.
-     * @param opts.evaluators - Optional custom evaluators.
-     * @param opts.services - Optional custom services.
-     * @param opts.memoryManagers - Optional custom memory managers.
-     * @param opts.providers - Optional context providers.
-     * @param opts.model - The model to use for generateText.
-     * @param opts.embeddingModel - The model to use for embedding.
-     * @param opts.agentId - Optional ID of the agent.
-     * @param opts.databaseAdapter - The database adapter used for interacting with the database.
-     * @param opts.fetch - Custom fetch function to use for making requests.
-     */
-
     constructor(opts: {
-        conversationLength?: number; // number of messages to hold in the recent message cache
-        agentId?: UUID; // ID of the agent
-        character?: Character; // The character to use for the agent
-        token: string; // JWT token, can be a JWT token if outside worker, or an OpenAI token if inside worker
-        serverUrl?: string; // The URL of the worker
-        actions?: Action[]; // Optional custom actions
-        evaluators?: Evaluator[]; // Optional custom evaluators
+        conversationLength?: number;
+        agentId?: UUID;
+        userId?: UUID;
+        character?: Character;
+        token: string;
+        serverUrl?: string;
+        actions?: Action[];
+        evaluators?: Evaluator[];
         plugins?: Plugin[];
         providers?: Provider[];
         modelProvider: ModelProviderName;
-
-        services?: Service[]; // Map of service name to service instance
-        managers?: IMemoryManager[]; // Map of table name to memory manager
-        databaseAdapter: IDatabaseAdapter; // The database adapter used for interacting with the database
+        services?: Service[];
+        managers?: IMemoryManager[];
+        databaseAdapter: IDatabaseAdapter;
         fetch?: typeof fetch | unknown;
         speechModelPath?: string;
         cacheManager: ICacheManager;
@@ -232,18 +176,17 @@ export class AgentRuntime implements IAgentRuntime {
             characterModelProvider: opts.character?.modelProvider,
         });
 
-        this.#conversationLength =
-            opts.conversationLength ?? this.#conversationLength;
+        this.#conversationLength = opts.conversationLength ?? this.#conversationLength;
 
         if (!opts.databaseAdapter) {
             throw new Error("No database adapter provided");
         }
         this.databaseAdapter = opts.databaseAdapter;
-        // use the character id if it exists, otherwise use the agentId if it is passed in, otherwise use the character name
-        this.agentId =
-            opts.character?.id ??
-            opts?.agentId ??
-            stringToUuid(opts.character?.name ?? uuidv4());
+        
+        // Generate UUIDs for agentId and userId if not provided
+        this.agentId = opts.character?.id ?? opts?.agentId ?? stringToUuid(opts.character?.name ?? uuidv4());
+        this.userId = opts.userId ?? this.agentId;
+        
         this.character = opts.character || defaultCharacter;
 
         // By convention, we create a user and room using the agent id.
@@ -259,11 +202,16 @@ export class AgentRuntime implements IAgentRuntime {
         });
 
         elizaLogger.success("Agent ID", this.agentId);
+        elizaLogger.success("User ID", this.userId);
 
         this.fetch = (opts.fetch as typeof fetch) ?? this.fetch;
-
         this.cacheManager = opts.cacheManager;
+        this.serverUrl = opts.serverUrl ?? this.serverUrl;
+        this.token = opts.token;
+        this.modelProvider = this.character.modelProvider ?? opts.modelProvider ?? ModelProviderName.OPENAI;
+        this.imageModelProvider = this.character.imageModelProvider ?? this.modelProvider;
 
+        // Initialize managers
         this.messageManager = new MemoryManager({
             runtime: this,
             tableName: "messages",
@@ -289,91 +237,71 @@ export class AgentRuntime implements IAgentRuntime {
             tableName: "fragments",
         });
 
+        // Register additional managers
         (opts.managers ?? []).forEach((manager: IMemoryManager) => {
             this.registerMemoryManager(manager);
         });
 
-        (opts.services ?? []).forEach((service: Service) => {
-            this.registerService(service);
-        });
-
-        this.serverUrl = opts.serverUrl ?? this.serverUrl;
-
-        elizaLogger.info("Setting model provider...");
-        elizaLogger.info("Model Provider Selection:", {
-            characterModelProvider: this.character.modelProvider,
-            optsModelProvider: opts.modelProvider,
-            currentModelProvider: this.modelProvider,
-            finalSelection:
-                this.character.modelProvider ??
-                opts.modelProvider ??
-                this.modelProvider,
-        });
-
-        this.modelProvider =
-            this.character.modelProvider ??
-            opts.modelProvider ??
-            this.modelProvider;
-
-        this.imageModelProvider =
-            this.character.imageModelProvider ?? this.modelProvider;
-
-        elizaLogger.info("Selected model provider:", this.modelProvider);
-        elizaLogger.info(
-            "Selected image model provider:",
-            this.imageModelProvider
-        );
-
-        // Validate model provider
-        if (!Object.values(ModelProviderName).includes(this.modelProvider)) {
-            elizaLogger.error("Invalid model provider:", this.modelProvider);
-            elizaLogger.error(
-                "Available providers:",
-                Object.values(ModelProviderName)
-            );
-            throw new Error(`Invalid model provider: ${this.modelProvider}`);
-        }
-
-        if (!this.serverUrl) {
-            elizaLogger.warn("No serverUrl provided, defaulting to localhost");
-        }
-
-        this.token = opts.token;
-
+        // Register plugins
         this.plugins = [
             ...(opts.character?.plugins ?? []),
             ...(opts.plugins ?? []),
         ];
 
         this.plugins.forEach((plugin) => {
-            plugin.actions?.forEach((action) => {
-                this.registerAction(action);
-            });
-
-            plugin.evaluators?.forEach((evaluator) => {
-                this.registerEvaluator(evaluator);
-            });
-
-            plugin.services?.forEach((service) => {
-                this.registerService(service);
-            });
-
-            plugin.providers?.forEach((provider) => {
-                this.registerContextProvider(provider);
-            });
+            plugin.actions?.forEach((action) => this.registerAction(action));
+            plugin.evaluators?.forEach((evaluator) => this.registerEvaluator(evaluator));
+            plugin.providers?.forEach((provider) => this.registerContextProvider(provider));
         });
 
-        (opts.actions ?? []).forEach((action) => {
-            this.registerAction(action);
-        });
+        // Register actions and providers
+        (opts.actions ?? []).forEach((action) => this.registerAction(action));
+        (opts.providers ?? []).forEach((provider) => this.registerContextProvider(provider));
+        (opts.evaluators ?? []).forEach((evaluator) => this.registerEvaluator(evaluator));
+    }
 
-        (opts.providers ?? []).forEach((provider) => {
-            this.registerContextProvider(provider);
-        });
+    public registerMemoryManager(manager: IMemoryManager): void {
+        if (!manager.tableName) {
+            throw new Error("Memory manager must have a tableName");
+        }
 
-        (opts.evaluators ?? []).forEach((evaluator: Evaluator) => {
-            this.registerEvaluator(evaluator);
-        });
+        if (this.memoryManagers.has(manager.tableName)) {
+            elizaLogger.warn(
+                `Memory manager ${manager.tableName} is already registered. Skipping registration.`
+            );
+            return;
+        }
+
+        this.memoryManagers.set(manager.tableName, manager);
+    }
+
+    public getMemoryManager(tableName: string): IMemoryManager | null {
+        return this.memoryManagers.get(tableName) || null;
+    }
+
+    public getService<T extends Service>(service: ServiceType): T | null {
+        const serviceInstance = this.services.get(service);
+        if (!serviceInstance) {
+            elizaLogger.error(`Service ${service} not found`);
+            return null;
+        }
+        return serviceInstance as T;
+    }
+
+    public async registerService(service: Service): Promise<void> {
+        const serviceType = service.serviceType;
+        elizaLogger.log("Registering service:", serviceType);
+
+        if (this.services.has(serviceType)) {
+            elizaLogger.warn(
+                `Service ${serviceType} is already registered. Skipping registration.`
+            );
+            return;
+        }
+
+        // Add the service to the services map
+        this.services.set(serviceType, service);
+        elizaLogger.success(`Service ${serviceType} registered successfully`);
     }
 
     async initialize() {
