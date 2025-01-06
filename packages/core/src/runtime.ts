@@ -110,6 +110,12 @@ export class AgentRuntime implements IAgentRuntime {
      */
     imageModelProvider: ModelProviderName;
 
+
+     /**
+     * The model to use for describing images.
+     */
+    imageVisionModelProvider: ModelProviderName;
+
     /**
      * Fetch function to use
      */
@@ -242,22 +248,78 @@ export class AgentRuntime implements IAgentRuntime {
             this.registerMemoryManager(manager);
         });
 
-        // Register plugins
-        this.plugins = [
-            ...(opts.character?.plugins ?? []),
-            ...(opts.plugins ?? []),
-        ];
+        // Register plugins and services
+this.plugins = [
+    ...(opts.character?.plugins ?? []),
+    ...(opts.plugins ?? []),
+];
 
-        this.plugins.forEach((plugin) => {
-            plugin.actions?.forEach((action) => this.registerAction(action));
-            plugin.evaluators?.forEach((evaluator) => this.registerEvaluator(evaluator));
-            plugin.providers?.forEach((provider) => this.registerContextProvider(provider));
-        });
+(opts.services ?? []).forEach((service: Service) => {
+    this.registerService(service);
+});
 
-        // Register actions and providers
-        (opts.actions ?? []).forEach((action) => this.registerAction(action));
-        (opts.providers ?? []).forEach((provider) => this.registerContextProvider(provider));
-        (opts.evaluators ?? []).forEach((evaluator) => this.registerEvaluator(evaluator));
+this.plugins.forEach((plugin) => {
+    plugin.actions?.forEach((action) => this.registerAction(action));
+    plugin.evaluators?.forEach((evaluator) => this.registerEvaluator(evaluator));
+    plugin.providers?.forEach((provider) => this.registerContextProvider(provider));
+});
+
+this.serverUrl = opts.serverUrl ?? this.serverUrl;
+
+elizaLogger.info("Setting model provider...");
+elizaLogger.info("Model Provider Selection:", {
+    characterModelProvider: this.character.modelProvider,
+    optsModelProvider: opts.modelProvider,
+    currentModelProvider: this.modelProvider,
+    finalSelection:
+        this.character.modelProvider ??
+        opts.modelProvider ??
+        this.modelProvider,
+});
+
+this.modelProvider =
+    this.character.modelProvider ??
+    opts.modelProvider ??
+    this.modelProvider;
+
+this.imageModelProvider =
+    this.character.imageModelProvider ?? this.modelProvider;
+
+elizaLogger.info("Selected model provider:", this.modelProvider);
+elizaLogger.info(
+    "Selected image model provider:",
+    this.imageModelProvider
+);
+
+this.imageVisionModelProvider =
+    this.character.imageVisionModelProvider ?? this.modelProvider;
+
+elizaLogger.info("Selected model provider:", this.modelProvider);
+elizaLogger.info(
+    "Selected image vision model provider:",
+    this.imageVisionModelProvider
+);
+
+// Validate model provider
+if (!Object.values(ModelProviderName).includes(this.modelProvider)) {
+    elizaLogger.error("Invalid model provider:", this.modelProvider);
+    elizaLogger.error(
+        "Available providers:",
+        Object.values(ModelProviderName)
+    );
+    throw new Error(`Invalid model provider: ${this.modelProvider}`);
+}
+
+if (!this.serverUrl) {
+    elizaLogger.warn("No serverUrl provided, defaulting to localhost");
+}
+
+this.token = opts.token;
+
+// Register actions and providers
+(opts.actions ?? []).forEach((action) => this.registerAction(action));
+(opts.providers ?? []).forEach((provider) => this.registerContextProvider(provider));
+(opts.evaluators ?? []).forEach((evaluator) => this.registerEvaluator(evaluator));
     }
 
     public registerMemoryManager(manager: IMemoryManager): void {
